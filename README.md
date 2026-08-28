@@ -89,8 +89,8 @@ need cross-arch on one host).
 
 | Target | Build host | Toolchain |
 |---|---|---|
-| Linux amd64 | Alpine amd64 | `apk add gcc musl-dev make` |
-| Linux arm64 | Alpine arm64 | `apk add gcc musl-dev make` |
+| Linux amd64 | Alpine amd64 | `apk add gcc musl-dev linux-headers make` |
+| Linux arm64 | Alpine arm64 | `apk add gcc musl-dev linux-headers make` |
 | FreeBSD amd64 | FreeBSD 13+ amd64 | `pkg install gmake` (invoke `gmake`) |
 | FreeBSD arm64 | FreeBSD 13+ arm64 | `pkg install gmake` (invoke `gmake`) |
 
