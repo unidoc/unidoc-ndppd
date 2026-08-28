@@ -24,27 +24,29 @@ jobs:
             # this avoids needing a cross-compiler/sysroot entirely.
             runs-on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs-on }}
-    container:
-      image: alpine:3.24
     steps:
-      - name: Install build dependencies
-        # linux-headers provides <linux/filter.h> (BPF) that iface.c needs -
-        # not part of musl-dev, easy to miss since a dev machine often has
-        # it installed already for unrelated reasons.
-        run: apk add --no-cache gcc musl-dev linux-headers make file
-
       - uses: actions/checkout@v4
 
-      - name: Build
-        # Explicit VERSION, not relying on `git describe` inside CI - the
-        # checkout is shallow (no guarantee tags are even fetched), and
-        # the pushed tag is already known directly as github.ref_name.
-        run: make VERSION=${{ github.ref_name }}
-
-      - name: Verify static, no interpreter
+      # No job-level `container:` here on purpose: actions/checkout and
+      # actions/upload-artifact are JS actions, and GitHub only bundles a
+      # Node runtime for x64 Alpine containers - on the arm64 runner that
+      # fails with "JavaScript Actions in Alpine containers are only
+      # supported on x64 Linux runners". Checkout/upload run natively on
+      # the host instead; only the actual compile+verify happens inside a
+      # throwaway Alpine container via `docker run` (Docker is preinstalled
+      # on GitHub-hosted runners, x64 and arm64 alike).
+      - name: Build + verify in Alpine container
         run: |
-          file bin/unidoc-ndppd
-          ! readelf -l bin/unidoc-ndppd | grep -q INTERP
+          docker run --rm -v "$PWD:/work" -w /work alpine:3.24 sh -c '
+            set -e
+            # linux-headers provides <linux/filter.h> (BPF) that iface.c
+            # needs - not part of musl-dev, easy to miss since a dev
+            # machine often has it installed already for unrelated reasons.
+            apk add --no-cache gcc musl-dev linux-headers make file
+            make VERSION=${{ github.ref_name }}
+            file bin/unidoc-ndppd
+            ! readelf -l bin/unidoc-ndppd | grep -q INTERP
+          '
 
       - name: Rename artifact
         run: |
