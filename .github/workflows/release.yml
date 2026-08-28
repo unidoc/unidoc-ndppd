@@ -31,7 +31,7 @@ jobs:
         # linux-headers provides <linux/filter.h> (BPF) that iface.c needs -
         # not part of musl-dev, easy to miss since a dev machine often has
         # it installed already for unrelated reasons.
-        run: apk add --no-cache gcc musl-dev linux-headers make
+        run: apk add --no-cache gcc musl-dev linux-headers make file
 
       - uses: actions/checkout@v4
 
