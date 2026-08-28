@@ -1,0 +1,84 @@
+name: Release
+
+# Triggered by pushing a version tag (v1.0.0, v1.1.0, ...). Builds fully
+# static Linux binaries only (amd64 + arm64) - one binary works on any
+# distro, musl or glibc, per the README's own build claim. FreeBSD
+# binaries are not built here (no FreeBSD support in GitHub-hosted
+# runners) - build those locally and `gh release upload <tag> <file>`
+# them onto the same release afterward.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            # Native runner, not QEMU: we're actually compiling C here, so
+            # this avoids needing a cross-compiler/sysroot entirely.
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    container:
+      image: alpine:3.24
+    steps:
+      - name: Install build dependencies
+        run: apk add --no-cache gcc musl-dev make
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        # Explicit VERSION, not relying on `git describe` inside CI - the
+        # checkout is shallow (no guarantee tags are even fetched), and
+        # the pushed tag is already known directly as github.ref_name.
+        run: make VERSION=${{ github.ref_name }}
+
+      - name: Verify static, no interpreter
+        run: |
+          file bin/unidoc-ndppd
+          ! readelf -l bin/unidoc-ndppd | grep -q INTERP
+
+      - name: Rename artifact
+        run: |
+          mkdir -p out
+          cp bin/unidoc-ndppd out/unidoc-ndppd-${{ github.ref_name }}-linux-${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unidoc-ndppd-linux-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * | tee SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: unidoc-ndppd ${{ github.ref_name }}
+          body: |
+            Static Linux binaries (amd64 + arm64), musl and glibc compatible.
+
+            FreeBSD binaries are added manually after this release is
+            created - if they're not attached yet, they're coming.
+          generate_release_notes: true
+          files: |
+            dist/*
