@@ -672,6 +672,7 @@ void nd_iface_rebind_all(void)
                 nd_log_info("%s: interface disappeared (was ifindex %u), waiting for it to reappear",
                             iface->name, iface->index);
                 iface->up = false;
+                iface->admin_up = false;
                 nd_session_iface_changed(iface, false);
             }
             continue;
@@ -698,12 +699,21 @@ void nd_iface_rebind_all(void)
             nd_log_error("%s: SIOCGIFHWADDR: %s", iface->name, strerror(errno));
         }
 
+        struct ifreq flags_ifr = { 0 };
+        strcpy(flags_ifr.ifr_name, iface->name);
+        bool admin_up = ioctl(ndL_io->fd, SIOCGIFFLAGS, &flags_ifr) == 0 && (flags_ifr.ifr_flags & IFF_UP);
+
         if (cur == iface->index && iface->up) {
             /* Same ifindex — no membership rebind needed. lladdr refresh
              * above is enough. */
             if (lladdr_changed) {
                 nd_log_debug("%s: lladdr refreshed, ifindex unchanged", iface->name);
             }
+            /* The kernel flushes a device's routes when it goes down and
+             * refuses new ones until it is up again. */
+            if (admin_up != iface->admin_up)
+                nd_session_iface_changed(iface, admin_up);
+            iface->admin_up = admin_up;
             continue;
         }
 
@@ -745,9 +755,16 @@ void nd_iface_rebind_all(void)
                          iface->name, old_index, strerror(errno));
         }
 
+        /* New ifindex: routes on the old one died with it, including when the
+         * delete+recreate happened between two passes (never seen absent). */
+        if (iface->up)
+            nd_session_iface_changed(iface, false);
+
         iface->index = cur;
         iface->up = true;
-        nd_session_iface_changed(iface, true);
+        if (admin_up)
+            nd_session_iface_changed(iface, true);
+        iface->admin_up = admin_up;
         nd_log_info("%s: bound, ifindex %u [%s]", iface->name, cur, nd_ll_ntoa(&iface->lladdr));
     }
 #else

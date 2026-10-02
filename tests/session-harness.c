@@ -1,4 +1,4 @@
-/* PoC for the PR #1 review (unidoc/unidoc-ndppd, head 598fbe1).
+/* Session-layer test, built and asserted by `make test`.
  *
  * Links the REAL session.c / proxy.c / rule.c / addr.c / alloc.c / log.c and
  * stubs only the kernel-facing layer (iface send/open/close, rt route/address
@@ -8,16 +8,10 @@
  *
  * The send_ns stub COUNTS calls with iface == NULL instead of crashing; the
  * real nd_iface_send_ns() dereferences iface->lladdr on its first line, so
- * any non-zero "ns_null" is a SIGSEGV in the daemon (confirmed end to end in
- * poc_1_e2e.sh).
+ * any non-zero "ns_null" is a SIGSEGV in the daemon.
  *
  * Not modelled: packet I/O, netlink, the 5 s startup window before
  * nd_rt_query_addresses() fills the address table.
- *
- * Build (Linux), from the repo root, against the checked-out session.c:
- *   cc -std=gnu99 -Isrc -o /tmp/poc_1 tests/poc_1_session.c \
- *      src/session.c src/proxy.c src/rule.c src/addr.c src/alloc.c src/log.c
- *   /tmp/poc_1
  */
 #include <arpa/inet.h>
 #include <stdio.h>

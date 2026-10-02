@@ -173,6 +173,10 @@ struct nd_iface {
      * nd_iface_rebind_all() sees it again and re-binds it. */
     bool up;
 
+    /* IFF_UP as of the last rebind pass (Linux). Autowired routes are re-added
+     * on the false->true edge: the kernel refuses routes on a down device. */
+    bool admin_up;
+
     nd_proxy_t *proxy;
     bool promiscuous; /* Which L2 mode was requested at open time — used for symmetric close. */
 
