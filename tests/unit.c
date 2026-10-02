@@ -1,6 +1,9 @@
-/* Rootless unit tests for the pure address helpers. Linked against every
- * object except ndppd.o (which owns main()). */
+/* Rootless unit tests for the pure address helpers. Linked against
+ * addr.o, alloc.o and log.o only (see UNIT_OBJS in the Makefile); they do
+ * not cover the session/interface logic, which needs the kernel-facing
+ * calls stubbed. */
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <arpa/inet.h>
 #include "../src/ndppd.h"
@@ -41,7 +44,9 @@ int main(void)
     CHECK(nd_addr_eq(&r, &(nd_addr_t){ .u8 = { 0xfd, 0, 0, 1, [15] = 5 } }));
 
     nd_lladdr_t ll = { 0x02, 0, 0, 0xaa, 0xbb, 0xcc };
-    CHECK(strcmp(nd_ll_ntoa(&ll), "2:0:0:aa:bb:cc") == 0);
+    /* ether_ntoa_r() spelling is libc-specific: glibc "2:0:0:aa:bb:cc", musl "02:00:00:AA:BB:CC". */
+    const char *lls = nd_ll_ntoa(&ll);
+    CHECK(strcmp(lls, "2:0:0:aa:bb:cc") == 0 || strcasecmp(lls, "02:00:00:aa:bb:cc") == 0);
 
     if (!failures)
         printf("ok   - unit tests\n");

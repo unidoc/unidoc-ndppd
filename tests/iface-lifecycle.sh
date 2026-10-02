@@ -14,7 +14,7 @@ if [ -z "${IN_NETNS:-}" ]; then
     exec env IN_NETNS=1 unshare -n sh "$0" "$@"
 fi
 
-T=$(mktemp -d); trap 'kill $P 2>/dev/null; rm -rf "$T"' EXIT
+P=; T=$(mktemp -d); trap '[ -n "$P" ] && kill "$P" 2>/dev/null; rm -rf "$T"' EXIT
 cat > "$T/c.conf" <<CONF
 proxy dummy0 {
     router yes

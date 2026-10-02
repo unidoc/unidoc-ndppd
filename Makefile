@@ -74,8 +74,19 @@ UNIT_OBJS = bin/addr.o bin/alloc.o bin/log.o
 bin/unit: tests/unit.c ${UNIT_OBJS}
 	${CC} ${CPPFLAGS} ${CFLAGS} -o $@ $^ ${LDFLAGS}
 
-test: bin/unit
+# Session-layer behaviour (own-address sessions, waiting-iface hold): links the
+# real session/proxy/rule code, stubs only the kernel-facing calls. Rootless.
+bin/session-harness: tests/session-harness.c src/session.c src/proxy.c src/rule.c src/addr.c src/alloc.c src/log.c
+	${CC} -std=gnu99 -Isrc ${CFLAGS} -o $@ $^ ${LDFLAGS}
+
+test: bin/unit bin/session-harness
 	./bin/unit
+	@./bin/session-harness > bin/session-harness.out; cat bin/session-harness.out; \
+	grep -q '^F1 own-address .*answered_at_60s=yes | ns_on_null_iface=0 | state_at_60s=1' bin/session-harness.out && \
+	grep -q '^F1 own-address removed@15s .*answered_at_60s=no | ns_on_null_iface=0' bin/session-harness.out && \
+	grep -q '^static rule .*ns_on_null_iface=0' bin/session-harness.out && \
+	grep -q 'ruleA_live_sessions_at_60s=0 | proxyB_session_created=yes' bin/session-harness.out \
+	|| { echo "FAIL - session harness"; exit 1; }; echo "ok   - session harness"
 
 # Needs root (creates/deletes network interfaces in a throwaway netns).
 system-test: all

@@ -332,6 +332,7 @@ void nd_session_handle_na(nd_session_t *session);
 nd_session_t *nd_session_find(const nd_addr_t *tgt, const nd_proxy_t *proxy);
 nd_session_t *nd_session_find_r(const nd_addr_t *tgt, const nd_iface_t *iface);
 void nd_session_update_all();
+void nd_session_iface_changed(const nd_iface_t *iface, bool up);
 
 /*
  * rule.c

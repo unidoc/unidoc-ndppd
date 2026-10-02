@@ -672,6 +672,7 @@ void nd_iface_rebind_all(void)
                 nd_log_info("%s: interface disappeared (was ifindex %u), waiting for it to reappear",
                             iface->name, iface->index);
                 iface->up = false;
+                nd_session_iface_changed(iface, false);
             }
             continue;
         }
@@ -746,6 +747,7 @@ void nd_iface_rebind_all(void)
 
         iface->index = cur;
         iface->up = true;
+        nd_session_iface_changed(iface, true);
         nd_log_info("%s: bound, ifindex %u [%s]", iface->name, cur, nd_ll_ntoa(&iface->lladdr));
     }
 #else
