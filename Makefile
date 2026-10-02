@@ -69,4 +69,16 @@ clean:
 # Missing on first build; the `-include` silently ignores that.
 -include ${DEPS}
 
-.PHONY: all install clean
+# Rootless: safe for CI. Pure-logic unit tests only.
+UNIT_OBJS = bin/addr.o bin/alloc.o bin/log.o
+bin/unit: tests/unit.c ${UNIT_OBJS}
+	${CC} ${CPPFLAGS} ${CFLAGS} -o $@ $^ ${LDFLAGS}
+
+test: bin/unit
+	./bin/unit
+
+# Needs root (creates/deletes network interfaces in a throwaway netns).
+system-test: all
+	@sh tests/iface-lifecycle.sh; rc=$$?; [ $$rc -eq 77 ] && { echo "(skipped)"; exit 0; }; exit $$rc
+
+.PHONY: all install clean test system-test

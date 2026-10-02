@@ -115,6 +115,18 @@ static void ndL_delete_route(nd_rt_route_t *route)
     ND_DELETE(cur);
 }
 
+bool nd_rt_is_local_addr(unsigned index, const nd_addr_t *addr)
+{
+    nd_rt_addr_t *rt_addr;
+
+    ND_LL_FOREACH_NODEF (ndL_addrs, rt_addr, next) {
+        if (rt_addr->iif == index && nd_addr_eq(&rt_addr->addr, addr))
+            return true;
+    }
+
+    return false;
+}
+
 static void ndL_new_addr(unsigned index, nd_addr_t *addr, unsigned pflen)
 {
     nd_rt_addr_t *rt_addr;

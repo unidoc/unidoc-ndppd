@@ -168,6 +168,11 @@ struct nd_iface {
 
     unsigned int index;
 
+    /* False while the interface is absent from the kernel (never existed
+     * yet at startup, or deleted at runtime). Packet I/O is skipped until
+     * nd_iface_rebind_all() sees it again and re-binds it. */
+    bool up;
+
     nd_proxy_t *proxy;
     bool promiscuous; /* Which L2 mode was requested at open time — used for symmetric close. */
 
@@ -416,6 +421,9 @@ void nd_rt_cleanup();
 bool nd_rt_query_addresses();
 bool nd_rt_query_routes();
 nd_rt_route_t *nd_rt_find_route(const nd_addr_t *addr, unsigned table);
+
+/* True if addr is configured on the interface with this ifindex (this host owns it). */
+bool nd_rt_is_local_addr(unsigned index, const nd_addr_t *addr);
 bool nd_rt_add_route(nd_addr_t *dst, unsigned pflen, unsigned oif, unsigned table);
 bool nd_rt_remove_route(nd_addr_t *dst, unsigned pflen, unsigned table);
 void nd_rt_remove_owned_routes();

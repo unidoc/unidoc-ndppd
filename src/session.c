@@ -40,7 +40,7 @@ static int ndL_session_count;
 
 static void ndL_up(nd_session_t *session)
 {
-    if (session->iface && !session->autowired && session->rule->autowire) {
+    if (session->iface && session->iface->up && !session->autowired && session->rule->autowire) {
         nd_rt_add_route(&session->tgt, 128, session->iface->index, session->rule->table);
         session->autowired = true;
     }
@@ -186,6 +186,14 @@ nd_session_t *nd_session_create(nd_rule_t *rule, const nd_addr_t *tgt)
             session->state = ND_STATE_INVALID;
             return session;
         }
+    } else if (rule->mode == ND_MODE_IFACE && rule->iface && rule->iface->up
+               && nd_rt_is_local_addr(rule->iface->index, &session->tgt_r)) {
+        /* The target is this host's own address on the rule's interface
+         * (e.g. the bridge address itself). Probing that interface with an
+         * NS can never work: nobody else owns the address, and a host does
+         * not answer its own NS. Answer directly. */
+        session->state = ND_STATE_VALID;
+        return session;
     } else if ((session->iface = rule->iface)) {
         session->iface->refcount++;
     }
@@ -206,6 +214,12 @@ void nd_session_update(nd_session_t *session)
 {
     switch (session->state) {
     case ND_STATE_INCOMPLETE:
+        /* Downstream interface is waiting (absent from the kernel): the NS
+         * could not be sent, so don't burn retransmits - hold until it binds. */
+        if (session->iface && !session->iface->up) {
+            session->ons_time = nd_current_time;
+            break;
+        }
         if (nd_current_time - session->ons_time < nd_conf_retrans_time)
             break;
 

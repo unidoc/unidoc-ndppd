@@ -101,5 +101,8 @@ __attribute__((format(printf, 2, 3))) void nd_log_printf(nd_loglevel_t level, co
         strftime(time_buf, sizeof(time_buf), "%F %T", &tm);
 
         printf("%s.%03ld | %-8s | %s\n", time_buf, nd_current_time % 1000, names[level], buf);
+        /* stdout is fully buffered when redirected (OpenRC output_log, files);
+         * without this, log lines sit unseen until the buffer fills. */
+        fflush(stdout);
     }
 }
