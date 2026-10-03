@@ -285,7 +285,7 @@ static void ndL_io_handler(nd_io_t *io, __attribute__((unused)) int events)
 
         nd_iface_t *iface;
 
-        ND_LL_SEARCH(ndL_first_iface, iface, next, iface->index == (unsigned int)lladdr.sll_ifindex);
+        ND_LL_SEARCH(ndL_first_iface, iface, next, iface->up && iface->index == (unsigned int)lladdr.sll_ifindex);
 
         if (!iface) {
             nd_log_trace("pkt on unknown ifindex %d, skip", lladdr.sll_ifindex);
@@ -458,6 +458,26 @@ nd_iface_t *nd_iface_open(const char *name, unsigned index, bool promiscuous)
     if (name) {
         unsigned resolved = if_nametoindex(name);
         if (!resolved) {
+#ifdef __linux__
+            /* A configured interface that does not exist yet is not fatal:
+             * Incus & co. create bridges asynchronously, possibly after us.
+             * Register it in the waiting state; nd_iface_rebind_all() binds
+             * it through the same path as a runtime delete+recreate. */
+            if (errno == ENODEV && !index) {
+                nd_iface_t *w;
+                ND_LL_SEARCH(ndL_first_iface, w, next, !strcmp(w->name, name));
+                if (w) {
+                    w->refcount++;
+                    return w;
+                }
+                w = ND_NEW(nd_iface_t);
+                *w = (nd_iface_t){ .refcount = 1, .promiscuous = promiscuous, .up = false };
+                strcpy(w->name, name);
+                ND_LL_PREPEND(ndL_first_iface, w, next);
+                nd_log_info("Interface %s does not exist yet, waiting for it to appear", name);
+                return w;
+            }
+#endif
             nd_log_error("Failed to get index of interface %s: %s", name, strerror(errno));
             return NULL;
         }
@@ -477,12 +497,24 @@ nd_iface_t *nd_iface_open(const char *name, unsigned index, bool promiscuous)
     /* If the specified interface is already opened, just increase the reference count. */
 
     nd_iface_t *iface;
-    ND_LL_SEARCH(ndL_first_iface, iface, next, iface->index == index);
+    ND_LL_SEARCH(ndL_first_iface, iface, next, iface->index == index && iface->up);
 
     if (iface) {
         iface->refcount++;
         return iface;
     }
+
+#ifdef __linux__
+    /* The same name may be sitting in the waiting state (opened before the
+     * interface existed); share it instead of creating a duplicate, and let
+     * rebind_all() activate it. */
+    ND_LL_SEARCH(ndL_first_iface, iface, next, !iface->up && !strcmp(iface->name, name));
+
+    if (iface) {
+        iface->refcount++;
+        return iface;
+    }
+#endif
 
 #ifdef __linux__
     /* Determine link-layer address. */
@@ -594,6 +626,7 @@ nd_iface_t *nd_iface_open(const char *name, unsigned index, bool promiscuous)
 
     *iface = (nd_iface_t){
         .index = index,
+        .up = true,
         .refcount = 1,
         .lladdr = *lladdr,
         .promiscuous = promiscuous,
@@ -621,14 +654,27 @@ void nd_iface_rebind_all(void)
     }
 
     ND_LL_FOREACH (ndL_first_iface, iface, next) {
+        errno = 0;
         unsigned int cur = if_nametoindex(iface->name);
+        if (cur == 0 && errno != 0 && errno != ENODEV) {
+            /* Lookup itself failed (e.g. EMFILE) - not evidence the
+             * interface is gone; keep state and retry on the next poll. */
+            nd_log_error("%s: if_nametoindex: %s", iface->name, strerror(errno));
+            continue;
+        }
         if (cur == 0) {
-            /* Interface currently absent (bridge in the middle of a
-             * delete+recreate, veth gone). Leave state as-is; the next
-             * poll or LINK event will retry when it reappears. Do NOT
-             * tear anything down — a permanent removal is indistinguishable
-             * from a transient one and the operator can always kill the
-             * daemon to force cleanup. */
+            /* Interface currently absent (bridge deleted, veth gone, or not
+             * created yet). Move to the waiting state: stop sending on the
+             * stale ifindex, but keep the object (sessions/rules/proxies
+             * reference it) so it re-binds when it reappears. Packet
+             * membership died with the interface in the kernel. */
+            if (iface->up) {
+                nd_log_info("%s: interface disappeared (was ifindex %u), waiting for it to reappear",
+                            iface->name, iface->index);
+                iface->up = false;
+                iface->admin_up = false;
+                nd_session_iface_changed(iface, false);
+            }
             continue;
         }
 
@@ -653,12 +699,21 @@ void nd_iface_rebind_all(void)
             nd_log_error("%s: SIOCGIFHWADDR: %s", iface->name, strerror(errno));
         }
 
-        if (cur == iface->index) {
+        struct ifreq flags_ifr = { 0 };
+        strcpy(flags_ifr.ifr_name, iface->name);
+        bool admin_up = ioctl(ndL_io->fd, SIOCGIFFLAGS, &flags_ifr) == 0 && (flags_ifr.ifr_flags & IFF_UP);
+
+        if (cur == iface->index && iface->up) {
             /* Same ifindex — no membership rebind needed. lladdr refresh
              * above is enough. */
             if (lladdr_changed) {
                 nd_log_debug("%s: lladdr refreshed, ifindex unchanged", iface->name);
             }
+            /* The kernel flushes a device's routes when it goes down and
+             * refuses new ones until it is up again. */
+            if (admin_up != iface->admin_up)
+                nd_session_iface_changed(iface, admin_up);
+            iface->admin_up = admin_up;
             continue;
         }
 
@@ -666,7 +721,12 @@ void nd_iface_rebind_all(void)
          * frames delivered on the NEW ifindex reach our socket, and stop
          * receiving on the (probably-dead) old one. */
         unsigned int old_index = iface->index;
-        nd_log_info("%s: ifindex changed %u → %u, rebinding multicast", iface->name, old_index, cur);
+        if (!iface->up && !old_index)
+            nd_log_info("%s: interface appeared (ifindex %u), binding", iface->name, cur);
+        else if (!iface->up)
+            nd_log_info("%s: interface reappeared (ifindex %u → %u), rebinding multicast", iface->name, old_index, cur);
+        else
+            nd_log_info("%s: ifindex changed %u → %u, rebinding multicast", iface->name, old_index, cur);
 
         int mr_type = iface->promiscuous ? PACKET_MR_PROMISC : PACKET_MR_ALLMULTI;
 
@@ -686,13 +746,26 @@ void nd_iface_rebind_all(void)
          * here doesn't break the new binding — just a stale kernel MR
          * entry until socket close. */
         struct packet_mreq drop_mreq = { .mr_ifindex = (int)old_index, .mr_type = mr_type };
-        if (setsockopt(ndL_io->fd, SOL_PACKET, PACKET_DROP_MEMBERSHIP, &drop_mreq, sizeof(drop_mreq)) == -1
+        /* Never drop when the kernel reused the same ifindex: that would
+         * remove the membership we just added. */
+        if (old_index && old_index != cur
+            && setsockopt(ndL_io->fd, SOL_PACKET, PACKET_DROP_MEMBERSHIP, &drop_mreq, sizeof(drop_mreq)) == -1
             && errno != ENODEV) {
             nd_log_error("%s: DROP_MEMBERSHIP on old ifindex %u: %s (non-fatal)",
                          iface->name, old_index, strerror(errno));
         }
 
+        /* New ifindex: routes on the old one died with it, including when the
+         * delete+recreate happened between two passes (never seen absent). */
+        if (iface->up)
+            nd_session_iface_changed(iface, false);
+
         iface->index = cur;
+        iface->up = true;
+        if (admin_up)
+            nd_session_iface_changed(iface, true);
+        iface->admin_up = admin_up;
+        nd_log_info("%s: bound, ifindex %u [%s]", iface->name, cur, nd_ll_ntoa(&iface->lladdr));
     }
 #else
     /* BSD: each iface owns its own /dev/bpf handle bound at open time.
@@ -808,7 +881,7 @@ void nd_iface_close(nd_iface_t *iface)
         return;
 
 #ifdef __linux__
-    if (!nd_iface_no_restore_flags) {
+    if (iface->up && !nd_iface_no_restore_flags) {
         int mr_type = iface->promiscuous ? PACKET_MR_PROMISC : PACKET_MR_ALLMULTI;
         const char *mr_name = iface->promiscuous ? "PROMISC" : "ALLMULTI";
         struct packet_mreq mreq = { .mr_ifindex = (int)iface->index, .mr_type = mr_type };
@@ -832,6 +905,12 @@ static void ndL_get_local_addr(nd_iface_t *iface, nd_addr_t *addr)
 
 static ssize_t ndL_send_icmp6(nd_iface_t *iface, ndL_ip6_msg_t *msg, size_t size, const nd_lladdr_t *lladdr)
 {
+    /* Waiting interface (absent from the kernel): nothing to send on. */
+    if (!iface->up) {
+        errno = ENODEV;
+        return -1;
+    }
+
     msg->eh.ether_type = htons(ETHERTYPE_IPV6);
     memcpy(msg->eh.ether_shost, &iface->lladdr, ETHER_ADDR_LEN);
     memcpy(msg->eh.ether_dhost, lladdr, ETHER_ADDR_LEN);
@@ -887,8 +966,12 @@ ssize_t nd_iface_send_na(nd_iface_t *iface, const nd_addr_t *dst, const nd_lladd
     if (router)
         msg.na.nd_na_flags_reserved |= ND_NA_FLAG_ROUTER;
 
-    nd_log_info("Write NA tgt=%s [%s], dst=%s [%s(%s)]", //
-                nd_ntoa(tgt), nd_ll_ntoa(tgt_ll), nd_ntoa(dst), nd_ll_ntoa(dst_ll), iface->name);
+    /* Matches Write NS's level below - both fire once per proxied
+     * address roughly every reachable-time interval, too frequent for
+     * info on a busy proxy (was flooding syslog at the default
+     * verbosity - see nd_opt_verbosity's ND_LOG_INFO default in log.c). */
+    nd_log_trace("Write NA tgt=%s [%s], dst=%s [%s(%s)]", //
+                 nd_ntoa(tgt), nd_ll_ntoa(tgt_ll), nd_ntoa(dst), nd_ll_ntoa(dst_ll), iface->name);
 
     return ndL_send_icmp6(iface, (ndL_ip6_msg_t *)&msg, sizeof(msg), dst_ll);
 }

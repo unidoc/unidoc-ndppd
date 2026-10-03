@@ -40,7 +40,7 @@ static int ndL_session_count;
 
 static void ndL_up(nd_session_t *session)
 {
-    if (session->iface && !session->autowired && session->rule->autowire) {
+    if (session->iface && session->iface->up && !session->autowired && session->rule->autowire) {
         nd_rt_add_route(&session->tgt, 128, session->iface->index, session->rule->table);
         session->autowired = true;
     }
@@ -186,6 +186,14 @@ nd_session_t *nd_session_create(nd_rule_t *rule, const nd_addr_t *tgt)
             session->state = ND_STATE_INVALID;
             return session;
         }
+    } else if (rule->mode == ND_MODE_IFACE && rule->iface && rule->iface->up
+               && nd_rt_is_local_addr(rule->iface->index, &session->tgt_r)) {
+        /* The target is this host's own address on the rule's interface
+         * (e.g. the bridge address itself). Probing that interface with an
+         * NS can never work: nobody else owns the address, and a host does
+         * not answer its own NS. Answer directly. */
+        session->state = ND_STATE_VALID;
+        return session;
     } else if ((session->iface = rule->iface)) {
         session->iface->refcount++;
     }
@@ -206,6 +214,19 @@ void nd_session_update(nd_session_t *session)
 {
     switch (session->state) {
     case ND_STATE_INCOMPLETE:
+        /* Downstream interface is waiting (absent from the kernel): the NS
+         * could not be sent, so don't burn retransmits - hold until it binds. */
+        if (session->iface && !session->iface->up) {
+            if (nd_current_time - session->state_time < nd_conf_invalid_ttl) {
+                session->ons_time = nd_current_time;
+                break;
+            }
+            /* Held long enough: expire like any unanswered probe so a
+             * long-absent iface cannot pin sessions against ND_SESSION_MAX. */
+            session->state = ND_STATE_INVALID;
+            session->state_time = nd_current_time;
+            break;
+        }
         if (nd_current_time - session->ons_time < nd_conf_retrans_time)
             break;
 
@@ -245,6 +266,21 @@ void nd_session_update(nd_session_t *session)
     case ND_STATE_VALID:
         if (nd_current_time - session->state_time < nd_conf_valid_ttl)
             break;
+
+        if (!session->iface) {
+            /* Nothing to probe: a static rule, or the target is this host's
+             * own address on the rule's iface. Re-check the latter so a
+             * removed address stops being answered. */
+            nd_rule_t *rule = session->rule;
+            if (rule->mode == ND_MODE_STATIC ||
+                (rule->iface && rule->iface->up && nd_rt_is_local_addr(rule->iface->index, &session->tgt_r))) {
+                session->state_time = nd_current_time;
+            } else {
+                session->state = ND_STATE_INVALID;
+                session->state_time = nd_current_time;
+            }
+            break;
+        }
 
         session->state = ND_STATE_STALE;
         session->state_time = nd_current_time;
@@ -311,6 +347,25 @@ nd_session_t *nd_session_find_r(const nd_addr_t *tgt, const nd_iface_t *iface)
     ND_LL_SEARCH(ndL_sessions_r[NDL_BUCKET(tgt)], session, next_r,
                  session->iface == iface && nd_addr_eq(&session->tgt_r, tgt));
     return session;
+}
+
+/* An interface went away or came back. The kernel deletes routes bound to a
+ * deleted interface, so autowired /128 routes are gone with it: forget that
+ * we added them, and re-add them for sessions that are still VALID once it
+ * reappears (otherwise ndL_up(), which only runs on the INCOMPLETE->VALID
+ * transition, would never restore them). */
+void nd_session_iface_changed(const nd_iface_t *iface, bool up)
+{
+    for (int i = 0; i < NDPPD_SESSION_BUCKETS; i++) {
+        ND_LL_FOREACH (ndL_sessions[i], session, next) {
+            if (session->iface != iface)
+                continue;
+            if (!up)
+                session->autowired = false;
+            else if (session->state == ND_STATE_VALID)
+                ndL_up(session);
+        }
+    }
 }
 
 void nd_session_update_all()
